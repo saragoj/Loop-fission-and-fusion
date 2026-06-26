@@ -74,10 +74,56 @@ struct OurLoopFissionPass : public LoopPass {
     return LoopBasicBlocksCopy.front();
   }
   
-  void loopFission(Loop *L){
+  // Pronalazi store instrukciju koja je inicijalizovala brojac konstantom
+StoreInst *findInitStore(AllocaInst *Counter) {
+    for (BasicBlock &BB : *Counter->getFunction()) {
+        for (Instruction &I : BB) {
+            StoreInst *Store = dyn_cast<StoreInst>(&I);
+            if (!Store || Store->getPointerOperand() != Counter)
+                continue;
+            if (!isa<ConstantInt>(Store->getValueOperand()))
+                continue;
+            return Store; // odmah prekida obe petlje, bez goto-a
+        }
+    }
+    return nullptr;
+}
+
+void loopFission(Loop *L){
     BasicBlock *LoopCopy = copyLoop(L);
-    LoopBasicBlocks.front()-> getTerminator()-> setSuccessor(1, LoopCopy); // Stavljamo da se sa prve petlje skace na drugu
-  }
+
+    BasicBlock *Header = LoopBasicBlocks.front();
+    AllocaInst *Counter = nullptr;
+    for (Instruction &I : *Header) {
+        ICmpInst *Cmp = dyn_cast<ICmpInst>(&I);
+        if (!Cmp)
+            continue;
+        LoadInst *Load = dyn_cast<LoadInst>(Cmp->getOperand(0));
+        if (!Load)
+            continue;
+        Counter = dyn_cast<AllocaInst>(Load->getPointerOperand());
+        break;
+    }
+
+    BasicBlock *EntryToLoopCopy = LoopCopy;
+
+    if (Counter) {
+        StoreInst *InitStore = findInitStore(Counter);
+        if (InitStore) {
+            BasicBlock *Preheader = BasicBlock::Create(
+                Header->getContext(), "", Header->getParent(), LoopCopy);
+
+            IRBuilder<> Builder(Preheader);
+            Instruction *ResetStore = InitStore->clone();
+            Builder.Insert(ResetStore);
+            Builder.CreateBr(LoopCopy);
+
+            EntryToLoopCopy = Preheader;
+        }
+    }
+
+    LoopBasicBlocks.front()->getTerminator()->setSuccessor(1, EntryToLoopCopy);
+}
 
   BasicBlock *findIfBasicBlock(std::vector<BasicBlock *> &LoopBasicBlocks, bool findFirst){
 
@@ -117,6 +163,11 @@ struct OurLoopFissionPass : public LoopPass {
   bool runOnLoop(Loop *L, LPPassManager &LPM) override {
     LoopBasicBlocks = L->getBlocksVector();
     loopFission(L);
+    //errs() << "[our-loop-fission] Found loop with header: " << L->getHeader()->getName() << "\n";
+    //BasicBlock *NewHeader = copyLoop(L);
+    //errs() << "[our-loop-fission] Cloned loop header: " << NewHeader->getName() << "\n";
+    // Note: this simple clone does not rewire the CFG to create two separate loops.
+    // It's a starting point following classroom structure (copyLoop implementation).
     BasicBlock *BranchBlock = findIfBasicBlock(LoopBasicBlocks, true);
     BranchInst *Branch = dyn_cast<BranchInst>(BranchBlock->getTerminator()->getSuccessor(1)->getTerminator());
     bool isConditional = Branch->isConditional();
